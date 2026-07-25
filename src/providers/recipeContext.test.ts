@@ -38,6 +38,15 @@ describe("selected recipe context", () => {
       ]
     });
     expect(context.currentDetail).toMatch(/off direct heat/i);
+    expect(context.recipeSteps).toHaveLength(10);
+    expect(context.recipeSteps.map((step) => step.stepNumber)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+    ]);
+    expect(context.recipeSteps[0]).toMatchObject({
+      stepNumber: 1,
+      instruction: carbonara.steps[0].instruction,
+      detail: carbonara.steps[0].detail
+    });
     expect(context.relevantSafetyNotes).toEqual(
       expect.arrayContaining([
         expect.stringMatching(/pan must remain off direct heat/i),
@@ -54,7 +63,12 @@ describe("selected recipe context", () => {
       question: "Is the pan too hot for the eggs?",
       requiresMeasurement: undefined
     });
-    expect(formatRecipeContext(context)).not.toContain("Steak au Poivre");
+    const formatted = formatRecipeContext(context);
+    expect(formatted).toContain("Product: Mise");
+    expect(formatted).toContain("Full ordered recipe steps:");
+    expect(formatted).toContain(`1. ${carbonara.steps[0].title}:`);
+    expect(formatted).toContain(`10. ${carbonara.steps[9].title}:`);
+    expect(formatted).not.toContain("Steak au Poivre");
   });
 
   it("clamps the step to the selected recipe and carries measurement safety", () => {
@@ -117,6 +131,12 @@ describe("selected recipe context", () => {
       isRecipeContext({
         ...valid,
         activeTimers: [{ label: "Broken", remainingSeconds: Number.NaN }]
+      })
+    ).toBe(false);
+    expect(
+      isRecipeContext({
+        ...valid,
+        recipeSteps: valid.recipeSteps.slice().reverse()
       })
     ).toBe(false);
   });

@@ -14,16 +14,15 @@ permanent API key never enters the browser bundle.
 
 ```bash
 npm install
-cp .env.example .env
-# Add your server-side GEMINI_API_KEY to .env
+# Add GEMINI_API_KEY to the existing server-only .env.local file.
 npm run dev
 ```
 
 Open [http://127.0.0.1:5173](http://127.0.0.1:5173).
 
-Without `GEMINI_API_KEY`, Mise automatically uses `MockVoiceProvider`. The full
-recipe library, timers, typed commands, navigation, and image-checkpoint UI
-remain usable, and the interface clearly labels the session as a local preview.
+Without `GEMINI_API_KEY`, Mise keeps the full recipe library, timers,
+navigation, and image-checkpoint UI available, shows the Live connection error,
+and offers an explicit `MockVoiceProvider` local preview for typed commands.
 
 Steak au Poivre retains its original instructional photographs in responsive
 720 px and 1200 px variants. The additional recipes use restrained editorial
@@ -36,10 +35,28 @@ interruptions.
 For the strongest demo checkpoint, open:
 
 ```text
-http://127.0.0.1:5173/?demo=crust
+http://127.0.0.1:5173/?demo=true
 ```
 
-This enters step 4 with a two-minute first-side timer.
+This opens Steak au Poivre directly, exposes the Test Kitchen image selector
+after cooking starts, and leaves every Gemini response and timer action real.
+
+## Deploy to Vercel
+
+Import the GitHub repository into Vercel and keep the detected Vite settings:
+
+- Build command: `npm run build`
+- Output directory: `dist`
+- Node.js runtime: 24.x
+
+Add `GEMINI_API_KEY` as a sensitive, server-only environment variable for the
+Production and Preview environments, then redeploy. Never prefix the variable
+with `VITE_`; that would expose it to the browser bundle.
+
+Vercel serves the built interface from its CDN and routes `/api/*` through the
+Express application as a Vercel Function. The browser still connects directly
+to Gemini Live using the constrained one-use token returned by
+`/api/gemini/token`.
 
 ## Architecture
 
@@ -56,11 +73,12 @@ This enters step 4 with a two-minute first-side timer.
   rate-limited.
 - Client-side function calls create timers and move through recipe steps.
 - Recipe context includes the selected recipe, technique, visible instruction,
-  practical detail, relevant safety notes, suggested timers, visual checkpoint,
-  completed steps, and active timers so spoken guidance stays aligned with the
-  interface.
+  complete ordered step list, visible instruction, practical detail, relevant
+  safety notes, suggested timers, visual checkpoint, completed steps, and
+  active timers so spoken guidance stays aligned with the interface.
 - `/api/gemini/analyze-image` uses `gemini-3.5-flash` for the reliable server
-  fallback behind “Does this look right?”
+  request behind “Does this look right?” and returns a brief assessment, one
+  next action, and an optional safety note.
 
 The Live model is `gemini-3.1-flash-live-preview`, the current model documented
 for low-latency native-audio Live API sessions.

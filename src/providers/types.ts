@@ -4,7 +4,8 @@ export type VoiceStatus =
   | "listening"
   | "thinking"
   | "speaking"
-  | "muted";
+  | "muted"
+  | "error";
 
 export type ProviderMode = "gemini-live" | "mock";
 
@@ -27,11 +28,20 @@ export interface RecipeContextVisualCheckpoint {
   requiresMeasurement?: boolean;
 }
 
+export interface RecipeContextStep {
+  stepNumber: number;
+  title?: string;
+  instruction: string;
+  detail: string;
+  safety?: string;
+}
+
 export interface RecipeContext {
   recipeId?: string;
   recipeTitle: string;
   recipeDescription?: string;
   recipeTechnique?: string;
+  recipeSteps: RecipeContextStep[];
   currentStep: number;
   totalSteps: number;
   currentInstruction: string;
@@ -58,8 +68,8 @@ export interface ToolCall {
 
 export interface ImageAssessment {
   assessment: string;
-  action: string;
-  safetyWarning?: string;
+  nextAction: string;
+  safetyNote: string | null;
   isMock?: boolean;
 }
 
@@ -76,6 +86,8 @@ export interface VoiceProvider {
   readonly mode: ProviderMode;
   connect(): Promise<void>;
   disconnect(): Promise<void>;
+  mute?(): Promise<void>;
+  unmute?(): Promise<void>;
   sendText(text: string): Promise<void>;
   sendImage(image: File, question: string): Promise<ImageAssessment>;
   updateRecipeContext(context: RecipeContext): void;

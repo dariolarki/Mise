@@ -11,7 +11,12 @@ export function createGeminiProvider(
 
 export function createMockProvider(
   events: VoiceProviderEvents,
-  context: RecipeContext
+  context: RecipeContext,
+  options?: { allowMockImageFallback?: boolean }
 ) {
-  return new MockVoiceProvider(events, context);
+  return new MockVoiceProvider(
+    events,
+    context,
+    options?.allowMockImageFallback ?? true
+  );
 }

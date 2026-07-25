@@ -21,7 +21,8 @@ export class MockVoiceProvider implements VoiceProvider {
 
   constructor(
     private readonly events: VoiceProviderEvents,
-    initialContext: RecipeContext
+    initialContext: RecipeContext,
+    private readonly allowMockImageFallback = true
   ) {
     this.context = initialContext;
   }
@@ -64,7 +65,24 @@ export class MockVoiceProvider implements VoiceProvider {
     if (cleanText.startsWith(NARRATION_REQUEST_PREFIX)) {
       response = this.narrateCurrentStep();
     } else if (lower.includes("timer")) {
-      const requestedNumber = Number(lower.match(/(\d+)/)?.[1]);
+      const requestedToken = lower.match(
+        /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b/
+      )?.[1];
+      const numberWords: Record<string, number> = {
+        one: 1,
+        two: 2,
+        three: 3,
+        four: 4,
+        five: 5,
+        six: 6,
+        seven: 7,
+        eight: 8,
+        nine: 9,
+        ten: 10
+      };
+      const requestedNumber = requestedToken
+        ? numberWords[requestedToken] ?? Number(requestedToken)
+        : Number.NaN;
       const suggestedTimer = this.context.suggestedTimers?.[0];
       const hasRequestedDuration = Number.isFinite(requestedNumber);
       const durationSeconds = hasRequestedDuration
@@ -131,19 +149,24 @@ export class MockVoiceProvider implements VoiceProvider {
     try {
       return await analyzeImageWithGemini(image, question, this.context);
     } catch (error) {
-      if (!(error instanceof GeminiUnavailableError)) throw error;
+      if (
+        !(error instanceof GeminiUnavailableError) ||
+        !this.allowMockImageFallback
+      ) {
+        throw error;
+      }
       await wait(900);
       const requiresMeasurement =
         this.context.visualCheckpoint?.requiresMeasurement ||
         this.isChickenContext();
       return {
         assessment: "Mock assessment: image analysis needs a Gemini API credential.",
-        action:
+        nextAction:
           this.context.visualCheckpoint?.immediateAction ??
           (this.isSteakContext()
             ? "If the steak releases cleanly and the crust is deep brown, flip it; otherwise give it 30 more seconds."
             : this.context.currentInstruction),
-        safetyWarning: requiresMeasurement
+        safetyNote: requiresMeasurement
           ? "Appearance cannot confirm doneness or safety. Use a thermometer and provide the internal reading."
           : this.context.relevantSafetyNotes?.[0] ??
             this.context.currentSafety ??

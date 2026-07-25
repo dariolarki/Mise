@@ -20,17 +20,34 @@ export async function analyzeImageWithGemini(
       recipeContext
     })
   });
-  const payload = (await response.json().catch(() => ({}))) as
-    | ImageAssessment
-    | { error?: string; code?: string };
+  const payload = (await response.json().catch(() => ({}))) as unknown;
 
-  if (!response.ok || !("assessment" in payload)) {
+  if (!response.ok || !isImageAssessment(payload)) {
+    const errorPayload =
+      payload && typeof payload === "object"
+        ? (payload as { error?: unknown; code?: unknown })
+        : {};
     const message =
-      ("error" in payload && payload.error) || "Gemini image analysis failed.";
-    if ("code" in payload && payload.code === "GEMINI_NOT_CONFIGURED") {
+      typeof errorPayload.error === "string"
+        ? errorPayload.error
+        : "Gemini image analysis failed.";
+    if (errorPayload.code === "GEMINI_NOT_CONFIGURED") {
       throw new GeminiUnavailableError(message);
     }
     throw new Error(message);
   }
   return payload;
+}
+
+function isImageAssessment(value: unknown): value is ImageAssessment {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const assessment = value as Partial<ImageAssessment>;
+  return (
+    typeof assessment.assessment === "string" &&
+    Boolean(assessment.assessment.trim()) &&
+    typeof assessment.nextAction === "string" &&
+    Boolean(assessment.nextAction.trim()) &&
+    (assessment.safetyNote === null ||
+      typeof assessment.safetyNote === "string")
+  );
 }

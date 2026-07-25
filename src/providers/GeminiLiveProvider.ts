@@ -24,10 +24,39 @@ import {
   type RecipeContext,
   type ToolCall,
   type VoiceProvider,
-  type VoiceProviderEvents
+  type VoiceProviderEvents,
+  type VoiceStatus
 } from "./types";
 
-const LIVE_MODEL = "gemini-3.1-flash-live-preview";
+export const FALLBACK_LIVE_MODEL = "gemini-3.1-flash-live-preview";
+
+type RealtimeInput = Parameters<Session["sendRealtimeInput"]>[0];
+type ToolResponse = Parameters<Session["sendToolResponse"]>[0];
+
+function sanitizedErrorMessage(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : fallback;
+  return message
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, "[redacted-api-key]")
+    .replace(
+      /([?&](?:key|access_token)=)[^&\s]+/gi,
+      "$1[redacted-token]"
+    )
+    .replace(
+      /\b(?:auth_tokens|authTokens)\/[^\s"'&]+/gi,
+      "[redacted-token]"
+    );
+}
+
+function liveLog(
+  event: string,
+  details?: Record<string, boolean | number | string | undefined>
+) {
+  if (details) {
+    console.info(`[Mise Live] ${event}`, details);
+  } else {
+    console.info(`[Mise Live] ${event}`);
+  }
+}
 
 export function buildFunctionDeclarations(totalSteps: number) {
   const maximumStep = Math.max(
@@ -103,7 +132,10 @@ export class GeminiLiveProvider implements VoiceProvider {
   private goAwayTimer?: number;
   private resumptionHandle?: string;
   private ephemeralToken?: string;
+  private liveModel = FALLBACK_LIVE_MODEL;
   private sessionGeneration = 0;
+  private failedGeneration?: number;
+  private lastStatus?: VoiceStatus;
   private inputContext?: AudioContext;
   private inputStream?: MediaStream;
   private inputProcessor?: ScriptProcessorNode;
@@ -121,47 +153,168 @@ export class GeminiLiveProvider implements VoiceProvider {
     this.context = initialContext;
   }
 
+  private emitStatus(status: VoiceStatus) {
+    if (status !== this.lastStatus) {
+      liveLog("status", { status });
+      this.lastStatus = status;
+    }
+    this.events.onStatusChange(status);
+  }
+
+  private reportFailure(
+    operation: string,
+    error: unknown,
+    generation = this.sessionGeneration
+  ) {
+    if (this.intentionalDisconnect || this.failedGeneration === generation) return;
+    this.failedGeneration = generation;
+    const detail = sanitizedErrorMessage(error, "Unknown Gemini Live error.");
+    liveLog("failure", { operation, detail, generation });
+    this.events.onError(
+      new Error(`Gemini Live ${operation} failed. ${detail}`)
+    );
+    this.emitStatus("error");
+  }
+
+  private safeSendRealtimeInput(
+    input: RealtimeInput,
+    operation: string,
+    reportMissingSession = true
+  ) {
+    const session = this.session;
+    if (!session) {
+      if (reportMissingSession) {
+        this.reportFailure(operation, new Error("The Live session is not connected."));
+      }
+      return false;
+    }
+    try {
+      session.sendRealtimeInput(input);
+      if (operation !== "microphone audio") {
+        liveLog("realtime-input-sent", { operation });
+      }
+      return true;
+    } catch (error) {
+      this.reportFailure(operation, error);
+      queueMicrotask(() => {
+        if (this.session === session) this.closeSessionTransport(session);
+      });
+      return false;
+    }
+  }
+
+  private safeSendToolResponse(response: ToolResponse) {
+    const session = this.session;
+    if (!session) {
+      this.reportFailure(
+        "tool response",
+        new Error("The Live session closed before the tool result was sent.")
+      );
+      return false;
+    }
+    try {
+      session.sendToolResponse(response);
+      liveLog("tool-response-sent", {
+        responseCount: Array.isArray(response.functionResponses)
+          ? response.functionResponses.length
+          : 1
+      });
+      return true;
+    } catch (error) {
+      this.reportFailure("tool response", error);
+      queueMicrotask(() => {
+        if (this.session === session) this.closeSessionTransport(session);
+      });
+      return false;
+    }
+  }
+
+  private closeSessionTransport(session = this.session) {
+    if (!session) return;
+    try {
+      session.close();
+    } catch (error) {
+      liveLog("transport-close-skipped", {
+        detail: sanitizedErrorMessage(error, "Transport already closed.")
+      });
+    }
+  }
+
   async connect() {
+    if (this.session && !this.intentionalDisconnect) {
+      liveLog("connect-skipped", { reason: "already-connected" });
+      this.emitStatus(this.isMuted ? "muted" : "listening");
+      return;
+    }
     this.intentionalDisconnect = false;
     this.ephemeralToken = undefined;
-    this.events.onStatusChange("connecting");
-    // Create and resume audio synchronously from the Start Cooking gesture.
-    // Safari can otherwise block native audio after the token request finishes.
-    this.outputContext = new AudioContext({ sampleRate: 24000 });
-    const audioReady = this.outputContext.resume();
-    this.sessionSystemInstruction =
-      `${BASE_SYSTEM_INSTRUCTION}\n\n${formatRecipeContext(this.context)}`;
-    await Promise.all([audioReady, this.openSession()]);
+    this.liveModel = FALLBACK_LIVE_MODEL;
+    this.failedGeneration = undefined;
+    this.isMuted = false;
+    this.emitStatus("connecting");
+    liveLog("connect-start", { fallbackModel: FALLBACK_LIVE_MODEL });
+
+    try {
+      // Create and resume audio synchronously from the Start Cooking gesture.
+      // Safari can otherwise block native audio after the token request finishes.
+      this.outputContext = new AudioContext({ sampleRate: 24000 });
+      const audioReady = this.outputContext.resume().then(() => {
+        liveLog("output-audio-ready", {
+          sampleRate: this.outputContext?.sampleRate
+        });
+      });
+      this.sessionSystemInstruction =
+        `${BASE_SYSTEM_INSTRUCTION}\n\n${formatRecipeContext(this.context)}`;
+      await Promise.all([audioReady, this.openSession()]);
+    } catch (error) {
+      this.reportFailure("connection", error);
+      this.closeSessionTransport();
+      this.session = undefined;
+      await this.outputContext?.close().catch(() => undefined);
+      this.outputContext = undefined;
+      if (error instanceof GeminiUnavailableError) throw error;
+      throw new Error(
+        sanitizedErrorMessage(error, "Could not connect to Gemini Live.")
+      );
+    }
 
     try {
       await this.startMicrophone();
       if (!this.intentionalDisconnect && this.session) {
-        this.events.onStatusChange("listening");
+        this.emitStatus("listening");
       }
     } catch (error) {
       if (this.intentionalDisconnect) return;
       this.isMuted = true;
+      const message =
+        error instanceof Error
+          ? `Gemini Live connected, but the microphone is unavailable: ${sanitizedErrorMessage(
+              error,
+              "Microphone unavailable."
+            )}`
+          : "Gemini Live connected, but the microphone is unavailable.";
+      liveLog("microphone-unavailable", {
+        detail: sanitizedErrorMessage(error, "Microphone unavailable.")
+      });
       this.events.onError(
-        new Error(
-          error instanceof Error
-            ? `Gemini Live connected, but the microphone is unavailable: ${error.message}`
-            : "Gemini Live connected, but the microphone is unavailable."
-        )
+        new Error(message)
       );
-      this.events.onStatusChange("muted");
+      this.emitStatus("muted");
     }
   }
 
   async disconnect() {
+    liveLog("disconnect-start");
     this.intentionalDisconnect = true;
     this.reconnecting = false;
     this.sessionGeneration += 1;
     this.stopMicrophone();
     this.stopAudioQueue();
-    this.session?.close();
+    this.closeSessionTransport();
     this.session = undefined;
     this.resumptionHandle = undefined;
     this.ephemeralToken = undefined;
+    this.liveModel = FALLBACK_LIVE_MODEL;
     this.pendingContext = undefined;
     this.pendingGoAway = false;
     if (this.goAwayTimer) window.clearTimeout(this.goAwayTimer);
@@ -172,7 +325,9 @@ export class GeminiLiveProvider implements VoiceProvider {
     this.assistantTranscript = "";
     await this.outputContext?.close().catch(() => undefined);
     this.outputContext = undefined;
-    this.events.onStatusChange("disconnected");
+    this.failedGeneration = undefined;
+    this.emitStatus("disconnected");
+    liveLog("disconnect-complete");
   }
 
   updateRecipeContext(context: RecipeContext) {
@@ -186,22 +341,37 @@ export class GeminiLiveProvider implements VoiceProvider {
   async setMuted(muted: boolean) {
     this.isMuted = muted;
     if (muted) {
-      this.session?.sendRealtimeInput({ audioStreamEnd: true });
+      this.safeSendRealtimeInput(
+        { audioStreamEnd: true },
+        "microphone stream end",
+        false
+      );
       this.stopMicrophone();
       this.stopAudioQueue();
-      this.events.onStatusChange("muted");
+      this.emitStatus("muted");
     } else {
       try {
         await this.startMicrophone();
         if (!this.intentionalDisconnect && this.session) {
-          this.events.onStatusChange("listening");
+          this.emitStatus("listening");
         }
       } catch (error) {
         this.isMuted = true;
-        this.events.onStatusChange("muted");
+        liveLog("microphone-unavailable", {
+          detail: sanitizedErrorMessage(error, "Microphone unavailable.")
+        });
+        this.emitStatus("muted");
         throw error;
       }
     }
+  }
+
+  async mute() {
+    await this.setMuted(true);
+  }
+
+  async unmute() {
+    await this.setMuted(false);
   }
 
   async sendText(text: string) {
@@ -209,15 +379,16 @@ export class GeminiLiveProvider implements VoiceProvider {
     const cleanText = text.trim();
     if (!cleanText) return;
     this.pendingContext = undefined;
-    this.modelTurnActive = true;
-    this.events.onUserTranscript(cleanText);
-    this.events.onStatusChange("thinking");
     const prompt = cleanText.startsWith(NARRATION_REQUEST_PREFIX)
       ? cleanText
       : `Cook's question: ${cleanText}`;
-    this.session.sendRealtimeInput({
+    const sent = this.safeSendRealtimeInput({
       text: `${formatRecipeContext(this.context)}\n\n${prompt}`
-    });
+    }, "typed input");
+    if (!sent) throw new Error("Gemini Live could not send that message.");
+    this.modelTurnActive = true;
+    this.events.onUserTranscript(cleanText);
+    this.emitStatus("thinking");
   }
 
   async sendImage(image: File, question: string): Promise<ImageAssessment> {
@@ -231,13 +402,21 @@ export class GeminiLiveProvider implements VoiceProvider {
       message.sessionResumptionUpdate?.resumable &&
       message.sessionResumptionUpdate.newHandle
     ) {
+      const firstResumableHandle = !this.resumptionHandle;
       this.resumptionHandle = message.sessionResumptionUpdate.newHandle;
+      if (firstResumableHandle) liveLog("session-resumable");
     }
     if (message.goAway) {
       this.pendingGoAway = true;
+      liveLog("server-go-away", {
+        timeLeft: message.goAway.timeLeft
+      });
       this.scheduleGoAwayReconnect(message.goAway.timeLeft);
     }
     if (message.toolCallCancellation?.ids?.length) {
+      liveLog("tool-calls-cancelled", {
+        count: message.toolCallCancellation.ids.length
+      });
       this.events.onToolCallCancellation?.(message.toolCallCancellation.ids);
     }
 
@@ -248,7 +427,7 @@ export class GeminiLiveProvider implements VoiceProvider {
     if (inputText) {
       this.modelTurnActive = true;
       this.events.onUserTranscript(inputText);
-      this.events.onStatusChange("thinking");
+      this.emitStatus("thinking");
     }
     if (outputText) {
       this.modelTurnActive = true;
@@ -261,16 +440,23 @@ export class GeminiLiveProvider implements VoiceProvider {
     }
 
     if (content?.interrupted) {
+      liveLog("response-interrupted");
       this.stopAudioQueue();
       this.modelTurnActive = false;
       this.receivingAssistantTranscript = false;
-      this.events.onStatusChange(this.isMuted ? "muted" : "listening");
+      this.emitStatus(this.isMuted ? "muted" : "listening");
       this.flushPendingContext();
     }
 
     if (!content?.interrupted) {
       for (const part of content?.modelTurn?.parts ?? []) {
-        if (part.inlineData?.data) this.playPcmAudio(part.inlineData.data);
+        if (
+          part.inlineData?.data &&
+          (!part.inlineData.mimeType ||
+            part.inlineData.mimeType.startsWith("audio/"))
+        ) {
+          this.playPcmAudio(part.inlineData.data);
+        }
       }
     }
 
@@ -284,6 +470,11 @@ export class GeminiLiveProvider implements VoiceProvider {
           name: functionCall.name as ToolCall["name"],
           args: functionCall.args ?? {}
         };
+        liveLog("tool-call", {
+          id: call.id,
+          name: call.name,
+          argumentCount: Object.keys(call.args).length
+        });
         try {
           const result = await this.events.onToolCall(call);
           const authoritativeContext = isRecipeContext(result.recipeContext)
@@ -299,19 +490,31 @@ export class GeminiLiveProvider implements VoiceProvider {
               recipeContext: formatRecipeContext(authoritativeContext)
             }
           });
+          liveLog("tool-result", {
+            id: call.id,
+            name: call.name,
+            ok: result.ok !== false
+          });
         } catch (error) {
+          const detail = sanitizedErrorMessage(error, "Tool execution failed.");
+          liveLog("tool-result", {
+            id: call.id,
+            name: call.name,
+            ok: false,
+            detail
+          });
           functionResponses.push({
             id: call.id,
             name: call.name,
             response: {
-              error: error instanceof Error ? error.message : "Tool execution failed."
+              error: detail
             }
           });
         }
       }
       this.pendingContext = undefined;
       this.executingTool = false;
-      this.session?.sendToolResponse({ functionResponses });
+      this.safeSendToolResponse({ functionResponses });
     }
 
     if (content?.turnComplete) {
@@ -320,7 +523,7 @@ export class GeminiLiveProvider implements VoiceProvider {
       const stillPlaying =
         this.outputContext && this.nextPlaybackTime > this.outputContext.currentTime;
       if (!stillPlaying) {
-        this.events.onStatusChange(this.isMuted ? "muted" : "listening");
+        this.emitStatus(this.isMuted ? "muted" : "listening");
       }
       if (this.pendingGoAway) {
         this.rotateSessionAfterGoAway();
@@ -333,16 +536,27 @@ export class GeminiLiveProvider implements VoiceProvider {
   }
 
   private async openSession(handle?: string) {
-    const token = this.ephemeralToken ?? (await this.fetchEphemeralToken());
-    this.ephemeralToken = token;
+    if (!this.ephemeralToken) {
+      const credentials = await this.fetchEphemeralToken();
+      this.ephemeralToken = credentials.token;
+      this.liveModel = credentials.model;
+    }
+    const token = this.ephemeralToken;
+    if (!token) throw new Error("Gemini returned an empty ephemeral token.");
     const ai = new GoogleGenAI({
       apiKey: token,
       httpOptions: { apiVersion: "v1alpha" }
     });
     const generation = ++this.sessionGeneration;
+    this.failedGeneration = undefined;
+    liveLog("session-opening", {
+      generation,
+      model: this.liveModel,
+      resuming: Boolean(handle)
+    });
 
     const session = await ai.live.connect({
-      model: LIVE_MODEL,
+      model: this.liveModel,
       config: {
         responseModalities: [Modality.AUDIO],
         systemInstruction: this.sessionSystemInstruction,
@@ -365,25 +579,38 @@ export class GeminiLiveProvider implements VoiceProvider {
         contextWindowCompression: { slidingWindow: {} }
       },
       callbacks: {
-        onopen: () => undefined,
-        onmessage: (message) => void this.handleMessage(message, generation),
+        onopen: () => {
+          liveLog("websocket-open", { generation, model: this.liveModel });
+        },
+        onmessage: (message) => {
+          void this.handleMessage(message, generation).catch((error) => {
+            this.reportFailure("message handling", error, generation);
+          });
+        },
         onerror: (event) => {
           if (generation !== this.sessionGeneration || this.intentionalDisconnect) return;
-          const message =
+          this.reportFailure(
+            "connection",
             event.error instanceof Error
-              ? event.error.message
-              : "Gemini Live connection error.";
-          this.events.onError(new Error(message));
+              ? event.error
+              : new Error("The Gemini Live WebSocket reported an error."),
+            generation
+          );
         },
-        onclose: () => this.handleSessionClose(generation)
+        onclose: (event) => this.handleSessionClose(generation, event)
       }
     });
 
     if (generation !== this.sessionGeneration || this.intentionalDisconnect) {
-      session.close();
+      this.closeSessionTransport(session);
       return;
     }
     this.session = session;
+    liveLog("session-ready", {
+      generation,
+      model: this.liveModel,
+      resuming: Boolean(handle)
+    });
   }
 
   private async fetchEphemeralToken() {
@@ -399,13 +626,28 @@ export class GeminiLiveProvider implements VoiceProvider {
       throw new Error(payload.error ?? "Could not create a Gemini Live token.");
     }
 
-    const { token } = (await tokenResponse.json()) as { token: string };
+    const payload = (await tokenResponse.json()) as {
+      token?: unknown;
+      model?: unknown;
+    };
+    const token = typeof payload.token === "string" ? payload.token : "";
     if (!token) throw new Error("The server returned an empty Gemini token.");
-    return token;
+    const model =
+      typeof payload.model === "string" &&
+      /^[a-z0-9][a-z0-9._/-]*$/i.test(payload.model)
+        ? payload.model
+        : FALLBACK_LIVE_MODEL;
+    liveLog("ephemeral-token-received", { model });
+    return { token, model };
   }
 
-  private handleSessionClose(generation: number) {
+  private handleSessionClose(generation: number, event?: CloseEvent) {
     if (generation !== this.sessionGeneration) return;
+    liveLog("websocket-close", {
+      generation,
+      code: event?.code,
+      clean: event?.wasClean
+    });
     this.stopAudioQueue();
     this.session = undefined;
     this.pendingGoAway = false;
@@ -417,7 +659,11 @@ export class GeminiLiveProvider implements VoiceProvider {
       return;
     }
     this.stopMicrophone();
-    this.events.onStatusChange("disconnected");
+    this.reportFailure(
+      "connection",
+      new Error("The Live session closed before it could be resumed."),
+      generation
+    );
   }
 
   private async reconnectSession() {
@@ -433,31 +679,31 @@ export class GeminiLiveProvider implements VoiceProvider {
     this.pendingGoAway = false;
     if (this.goAwayTimer) window.clearTimeout(this.goAwayTimer);
     this.goAwayTimer = undefined;
-    this.events.onStatusChange("connecting");
+    this.emitStatus("connecting");
+    liveLog("session-resume-start");
     const handle = this.resumptionHandle;
     const previousSession = this.session;
     this.session = undefined;
     this.sessionGeneration += 1;
     this.stopAudioQueue();
-    previousSession?.close();
+    this.closeSessionTransport(previousSession);
 
+    let resumed = false;
     try {
       await this.openSession(handle);
       if (!this.session) return;
-      this.events.onStatusChange(this.isMuted ? "muted" : "listening");
-      this.flushPendingContext();
+      resumed = true;
     } catch (error) {
-      this.events.onError(
-        new Error(
-          error instanceof Error
-            ? `Could not resume Gemini Live: ${error.message}`
-            : "Could not resume Gemini Live."
-        )
-      );
+      this.reportFailure("session resume", error);
       this.stopMicrophone();
-      this.events.onStatusChange("disconnected");
     } finally {
       this.reconnecting = false;
+      if (resumed && this.session && !this.intentionalDisconnect) {
+        liveLog("session-resume-complete");
+        this.emitStatus(this.isMuted ? "muted" : "listening");
+        // flushPendingContext intentionally runs after reconnecting is false.
+        this.flushPendingContext();
+      }
     }
   }
 
@@ -505,13 +751,14 @@ export class GeminiLiveProvider implements VoiceProvider {
       return;
     }
     const context = this.pendingContext;
-    this.pendingContext = undefined;
-    this.modelTurnActive = true;
-    this.session.sendRealtimeInput({
+    const sent = this.safeSendRealtimeInput({
       text:
         `[Recipe state update. Do not respond yet; use this state for the cook's next request.]\n` +
         formatRecipeContext(context)
-    });
+    }, "recipe context update");
+    if (!sent) return;
+    this.pendingContext = undefined;
+    this.modelTurnActive = true;
   }
 
   private async startMicrophone() {
@@ -523,6 +770,7 @@ export class GeminiLiveProvider implements VoiceProvider {
     const requestId = ++this.microphoneRequestId;
     const generation = this.sessionGeneration;
     const session = this.session;
+    liveLog("microphone-permission-requested", { generation });
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
@@ -569,12 +817,13 @@ export class GeminiLiveProvider implements VoiceProvider {
           event.inputBuffer.getChannelData(0),
           inputContext?.sampleRate ?? 48000
         );
-        this.session.sendRealtimeInput({
+        const sent = this.safeSendRealtimeInput({
           audio: {
             data: bytesToBase64(new Uint8Array(pcm.buffer)),
             mimeType: "audio/pcm;rate=16000"
           }
-        });
+        }, "microphone audio", false);
+        if (!sent) queueMicrotask(() => this.stopMicrophone());
       };
 
       inputSource.connect(inputProcessor);
@@ -585,6 +834,11 @@ export class GeminiLiveProvider implements VoiceProvider {
       this.inputSource = inputSource;
       this.inputProcessor = inputProcessor;
       this.silentGain = silentGain;
+      liveLog("microphone-streaming", {
+        generation,
+        inputSampleRate: inputContext.sampleRate,
+        outputSampleRate: 16000
+      });
     } catch (error) {
       stream.getTracks().forEach((track) => track.stop());
       await inputContext?.close().catch(() => undefined);
@@ -593,6 +847,7 @@ export class GeminiLiveProvider implements VoiceProvider {
   }
 
   private stopMicrophone() {
+    const wasStreaming = Boolean(this.inputStream || this.inputContext);
     this.microphoneRequestId += 1;
     if (this.inputProcessor) this.inputProcessor.onaudioprocess = null;
     this.inputProcessor?.disconnect();
@@ -605,6 +860,7 @@ export class GeminiLiveProvider implements VoiceProvider {
     this.silentGain = undefined;
     this.inputStream = undefined;
     this.inputContext = undefined;
+    if (wasStreaming) liveLog("microphone-stopped");
   }
 
   private playPcmAudio(base64Audio: string) {
@@ -619,6 +875,7 @@ export class GeminiLiveProvider implements VoiceProvider {
 
     const source = this.outputContext.createBufferSource();
     const generation = this.sessionGeneration;
+    const startingPlayback = this.lastStatus !== "speaking";
     source.buffer = buffer;
     source.connect(this.outputContext.destination);
     const startAt = Math.max(this.outputContext.currentTime, this.nextPlaybackTime);
@@ -634,15 +891,24 @@ export class GeminiLiveProvider implements VoiceProvider {
         !this.reconnecting &&
         !this.intentionalDisconnect
       ) {
-        this.events.onStatusChange(this.isMuted ? "muted" : "listening");
+        this.emitStatus(this.isMuted ? "muted" : "listening");
       }
-      if (!this.activeSources.size) this.rotateSessionAfterGoAway();
+      if (!this.activeSources.size) {
+        if (!this.modelTurnActive) liveLog("native-audio-idle");
+        this.rotateSessionAfterGoAway();
+      }
     };
     source.start(startAt);
-    this.events.onStatusChange("speaking");
+    if (startingPlayback) {
+      liveLog("native-audio-playing", {
+        sampleRate: buffer.sampleRate
+      });
+    }
+    this.emitStatus("speaking");
   }
 
   private stopAudioQueue() {
+    const stoppedCount = this.activeSources.size;
     this.activeSources.forEach((source) => {
       try {
         source.onended = null;
@@ -653,5 +919,8 @@ export class GeminiLiveProvider implements VoiceProvider {
     });
     this.activeSources.clear();
     this.nextPlaybackTime = this.outputContext?.currentTime ?? 0;
+    if (stoppedCount) {
+      liveLog("native-audio-cleared", { sourceCount: stoppedCount });
+    }
   }
 }

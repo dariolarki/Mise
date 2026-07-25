@@ -808,12 +808,38 @@ svg {
 }
 
 .connection-notice {
+  display: flex;
   margin: 0.65rem 0 0;
   color: var(--charcoal-soft);
   font-size: 0.62rem;
   letter-spacing: 0.075em;
-  text-align: right;
   text-transform: uppercase;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+}
+
+.connection-notice p {
+  margin: 0;
+  text-align: right;
+}
+
+.connection-notice button {
+  padding: 0.45rem 0;
+  border: 0;
+  border-bottom: 1px solid currentColor;
+  color: var(--oxblood);
+  background: transparent;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.connection-notice--error {
+  color: var(--oxblood);
 }
 
 .recipe-folio {
@@ -1237,6 +1263,11 @@ svg {
   cursor: pointer;
 }
 
+.kitchen-controls > button:disabled {
+  cursor: wait;
+  opacity: 0.45;
+}
+
 .kitchen-controls > button > svg {
   box-sizing: content-box;
   width: 1.45rem;
@@ -1384,6 +1415,7 @@ svg {
 
 .checkpoint header span,
 .checkpoint__question span,
+.test-kitchen-selector > div span,
 .assessment > div > span,
 .assessment__mode {
   color: var(--oxblood);
@@ -1391,6 +1423,61 @@ svg {
   font-weight: 700;
   letter-spacing: 0.15em;
   text-transform: uppercase;
+}
+
+.test-kitchen-selector {
+  display: grid;
+  margin-top: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--rule);
+  gap: 0.7rem;
+}
+
+.test-kitchen-selector > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.test-kitchen-selector small {
+  color: var(--charcoal-soft);
+  font-size: 0.62rem;
+  letter-spacing: 0.05em;
+}
+
+.test-kitchen-selector button {
+  display: grid;
+  min-height: 4.2rem;
+  padding: 0.45rem 0;
+  border: 0;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  color: var(--charcoal);
+  background: transparent;
+  grid-template-columns: 5.5rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.test-kitchen-selector button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.test-kitchen-selector button img {
+  display: block;
+  width: 5.5rem;
+  height: 3.5rem;
+  object-fit: cover;
+}
+
+.test-kitchen-selector button strong {
+  font-family: var(--serif);
+  font-size: 1.15rem;
+  font-weight: 400;
 }
 
 .checkpoint h2 {

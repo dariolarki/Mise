@@ -1,11 +1,13 @@
 import type {
   RecipeContext,
+  RecipeContextStep,
   RecipeContextSuggestedTimer,
   RecipeContextTimer,
   RecipeContextVisualCheckpoint
 } from "./types";
 
 interface RecipeContextSourceStep {
+  title?: string;
   instruction: string;
   detail: string;
   safety?: string;
@@ -71,6 +73,15 @@ export function buildRecipeContext({
     recipe.steps.length
   );
   const step = recipe.steps[safeStep - 1];
+  const recipeSteps: RecipeContextStep[] = recipe.steps.map(
+    ({ title, instruction, detail, safety }, index) => ({
+      stepNumber: index + 1,
+      title,
+      instruction,
+      detail,
+      safety
+    })
+  );
   const relevantSafetyNotes = uniqueStrings([
     step.safety,
     ...(recipe.safetyNotes ?? [])
@@ -104,6 +115,7 @@ export function buildRecipeContext({
     recipeTitle: recipe.title,
     recipeDescription: recipe.description,
     recipeTechnique: recipe.technique,
+    recipeSteps,
     currentStep: safeStep,
     totalSteps: recipe.steps.length,
     currentInstruction: step.instruction,
@@ -131,6 +143,27 @@ export function buildRecipeContext({
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function isRecipeStepArray(
+  value: unknown,
+  totalSteps: number | undefined
+): value is RecipeContextStep[] {
+  return (
+    Array.isArray(value) &&
+    value.length === totalSteps &&
+    value.every((step, index) => {
+      if (!step || typeof step !== "object") return false;
+      const candidate = step as RecipeContextStep;
+      return (
+        candidate.stepNumber === index + 1 &&
+        (candidate.title === undefined || typeof candidate.title === "string") &&
+        typeof candidate.instruction === "string" &&
+        typeof candidate.detail === "string" &&
+        (candidate.safety === undefined || typeof candidate.safety === "string")
+      );
+    })
+  );
 }
 
 function isTimerArray(value: unknown): value is RecipeContextTimer[] {
@@ -204,6 +237,7 @@ export function isRecipeContext(value: unknown): value is RecipeContext {
     (context.recipeTechnique === undefined ||
       typeof context.recipeTechnique === "string") &&
     hasValidBounds &&
+    isRecipeStepArray(context.recipeSteps, context.totalSteps) &&
     typeof context.currentInstruction === "string" &&
     typeof context.currentDetail === "string" &&
     (context.currentSafety === undefined ||

@@ -33,6 +33,8 @@ interface KitchenScreenProps {
   onPrevious(): void;
   onNext(): void;
   onReadStep(): void;
+  onConnectVoice(): void;
+  onUseMock(): void;
   onToggleMuted(): void;
   onOpenCamera(): void;
   onSendText(text: string): Promise<void>;
@@ -69,6 +71,8 @@ export function KitchenScreen({
   onPrevious,
   onNext,
   onReadStep,
+  onConnectVoice,
+  onUseMock,
   onToggleMuted,
   onOpenCamera,
   onSendText,
@@ -80,6 +84,19 @@ export function KitchenScreen({
   const totalSteps = recipe.steps.length;
   const step = getRecipeStep(recipe, currentStep);
   const progress = (currentStep / totalSteps) * 100;
+  const hasVoiceError = String(status) === "error";
+  const needsVoiceConnection = status === "disconnected" || hasVoiceError;
+  const voiceControlLabel = needsVoiceConnection
+    ? hasVoiceError
+      ? "Retry Gemini"
+      : "Connect Gemini"
+    : status === "connecting"
+      ? "Connecting"
+      : muted
+        ? "Unmute"
+        : status === "speaking"
+          ? "Speaking"
+          : "Listening";
 
   useEffect(() => {
     const nextStepNumber = currentStep + 1;
@@ -119,9 +136,17 @@ export function KitchenScreen({
       </header>
 
       {connectionNotice && (
-        <p className="connection-notice" role="status">
-          {connectionNotice}
-        </p>
+        <section
+          className={`connection-notice ${hasVoiceError ? "connection-notice--error" : ""}`}
+          role={hasVoiceError ? "alert" : "status"}
+        >
+          <p>{connectionNotice}</p>
+          {hasVoiceError && mode === "gemini-live" && (
+            <button type="button" onClick={onUseMock}>
+              Continue in Local Preview
+            </button>
+          )}
+        </section>
       )}
 
       <section className="recipe-folio" aria-label={`Step ${currentStep} of ${totalSteps}`}>
@@ -164,7 +189,12 @@ export function KitchenScreen({
           className="read-step"
           type="button"
           onClick={onReadStep}
-          disabled={status === "disconnected" || status === "connecting" || muted}
+          disabled={
+            status === "disconnected" ||
+            status === "connecting" ||
+            hasVoiceError ||
+            muted
+          }
           aria-label={`Read step ${currentStep} aloud`}
         >
           <Volume2 aria-hidden="true" />
@@ -221,11 +251,20 @@ export function KitchenScreen({
         <button
           className={`voice-control ${status === "listening" ? "is-active" : ""}`}
           type="button"
-          onClick={onToggleMuted}
-          aria-label={muted ? "Unmute microphone" : "Mute microphone"}
+          onClick={needsVoiceConnection ? onConnectVoice : onToggleMuted}
+          disabled={status === "connecting"}
+          aria-label={
+            needsVoiceConnection
+              ? hasVoiceError
+                ? "Retry Gemini Live"
+                : "Connect Gemini Live"
+              : muted
+                ? "Unmute microphone"
+                : "Mute microphone"
+          }
         >
           {muted ? <MicOff /> : <Mic />}
-          <span>{muted ? "Unmute" : status === "speaking" ? "Speaking" : "Listening"}</span>
+          <span>{voiceControlLabel}</span>
         </button>
 
         <button className="camera-control" type="button" onClick={onOpenCamera}>
@@ -237,10 +276,11 @@ export function KitchenScreen({
           className="sound-control"
           type="button"
           onClick={onToggleMuted}
+          disabled={needsVoiceConnection || status === "connecting"}
           aria-label={muted ? "Turn voice on" : "Mute voice"}
         >
           {muted ? <MicOff /> : <Volume2 />}
-          <span>{muted ? "Muted" : "Voice on"}</span>
+          <span>{needsVoiceConnection ? "Voice off" : muted ? "Muted" : "Voice on"}</span>
         </button>
       </section>
 

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { MAX_TIMER_SECONDS } from "../constants";
-import { buildFunctionDeclarations } from "./GeminiLiveProvider";
+import {
+  buildFunctionDeclarations,
+  FALLBACK_LIVE_MODEL
+} from "./GeminiLiveProvider";
 
 interface IntegerProperty {
   type: string;
@@ -38,6 +41,10 @@ function integerProperty(
 }
 
 describe("Gemini Live tool declarations", () => {
+  it("uses the current native-audio Live model as its validated fallback", () => {
+    expect(FALLBACK_LIVE_MODEL).toBe("gemini-3.1-flash-live-preview");
+  });
+
   it.each([
     [9, 9],
     [10, 10],

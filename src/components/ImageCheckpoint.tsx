@@ -6,14 +6,24 @@ interface ImageCheckpointProps {
   open: boolean;
   defaultQuestion: string;
   uploadPrompt: string;
+  showTestKitchenImages?: boolean;
   onClose(): void;
   onAnalyze(file: File, question: string): Promise<ImageAssessment>;
 }
+
+const TEST_KITCHEN_IMAGES = [
+  {
+    label: "Partially seared steak",
+    source: "/recipe-steps/04-sear-first-side-1200.jpg",
+    fileName: "partially-seared-steak.jpg"
+  }
+] as const;
 
 export function ImageCheckpoint({
   open,
   defaultQuestion,
   uploadPrompt,
+  showTestKitchenImages = false,
   onClose,
   onAnalyze
 }: ImageCheckpointProps) {
@@ -23,6 +33,7 @@ export function ImageCheckpoint({
   const [result, setResult] = useState<ImageAssessment>();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [loadingTestImage, setLoadingTestImage] = useState(false);
   const previewUrl = useMemo(() => (file ? URL.createObjectURL(file) : ""), [file]);
 
   useEffect(
@@ -38,6 +49,7 @@ export function ImageCheckpoint({
     setResult(undefined);
     setError("");
     setLoading(false);
+    setLoadingTestImage(false);
     if (fileInput.current) fileInput.current.value = "";
   }, [defaultQuestion, open]);
 
@@ -58,6 +70,33 @@ export function ImageCheckpoint({
       );
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function selectTestKitchenImage(
+    image: (typeof TEST_KITCHEN_IMAGES)[number]
+  ) {
+    setError("");
+    setResult(undefined);
+    setLoadingTestImage(true);
+    try {
+      const response = await fetch(image.source);
+      if (!response.ok) throw new Error("The Test Kitchen image could not be loaded.");
+      const blob = await response.blob();
+      setFile(
+        new File([blob], image.fileName, {
+          type: blob.type || "image/jpeg"
+        })
+      );
+      if (fileInput.current) fileInput.current.value = "";
+    } catch (selectionError) {
+      setError(
+        selectionError instanceof Error
+          ? selectionError.message
+          : "The Test Kitchen image could not be loaded."
+      );
+    } finally {
+      setLoadingTestImage(false);
     }
   }
 
@@ -82,6 +121,28 @@ export function ImageCheckpoint({
 
         {!result ? (
           <>
+            {showTestKitchenImages && (
+              <section className="test-kitchen-selector" aria-label="Test Kitchen images">
+                <div>
+                  <span>Test Kitchen</span>
+                  <small>Development shortcut</small>
+                </div>
+                {TEST_KITCHEN_IMAGES.map((image) => (
+                  <button
+                    type="button"
+                    key={image.source}
+                    onClick={() => void selectTestKitchenImage(image)}
+                    disabled={loadingTestImage}
+                  >
+                    <img src={image.source} alt="" />
+                    <strong>
+                      {loadingTestImage ? "Loading image…" : image.label}
+                    </strong>
+                  </button>
+                ))}
+              </section>
+            )}
+
             <button
               className={`checkpoint__upload ${previewUrl ? "has-image" : ""}`}
               type="button"
@@ -103,7 +164,11 @@ export function ImageCheckpoint({
               accept="image/*"
               capture="environment"
               hidden
-              onChange={(event) => setFile(event.target.files?.[0])}
+              onChange={(event) => {
+                setFile(event.target.files?.[0]);
+                setResult(undefined);
+                setError("");
+              }}
             />
 
             <label className="checkpoint__question">
@@ -116,7 +181,7 @@ export function ImageCheckpoint({
               className="primary-action checkpoint__analyze"
               type="button"
               onClick={analyze}
-              disabled={loading}
+              disabled={loading || loadingTestImage}
             >
               <span>{loading ? "Looking closely…" : "Check with Gemini"}</span>
               {loading && <LoaderCircle className="spinner" />}
@@ -124,19 +189,21 @@ export function ImageCheckpoint({
           </>
         ) : (
           <div className="assessment">
-            {result.isMock && <span className="assessment__mode">Local preview</span>}
+            {result.isMock && (
+              <span className="assessment__mode">Local preview</span>
+            )}
             <div>
               <span>What I can see</span>
               <p>{result.assessment}</p>
             </div>
             <div>
               <span>Do this now</span>
-              <strong>{result.action}</strong>
+              <strong>{result.nextAction}</strong>
             </div>
-            {result.safetyWarning && (
+            {result.safetyNote && (
               <div className="assessment__safety">
                 <span>Safety</span>
-                <p>{result.safetyWarning}</p>
+                <p>{result.safetyNote}</p>
               </div>
             )}
             <button className="secondary-action" type="button" onClick={() => setResult(undefined)}>

@@ -6,7 +6,8 @@ const statusLabels: Record<VoiceStatusValue, string> = {
   listening: "Listening",
   thinking: "Thinking",
   speaking: "Speaking",
-  muted: "Muted"
+  muted: "Muted",
+  error: "Connection error"
 };
 
 interface VoiceStatusProps {

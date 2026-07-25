@@ -14,6 +14,7 @@ import {
 } from "./data/recipe";
 import { useTimers } from "./hooks/useTimers";
 import { createGeminiProvider, createMockProvider } from "./providers/createProvider";
+import { analyzeImageWithGemini } from "./providers/imageAnalysis";
 import { buildRecipeContext } from "./providers/recipeContext";
 import { STEP_NARRATION_REQUEST } from "./providers/systemInstruction";
 import {
@@ -29,16 +30,38 @@ import {
 
 type Screen = "library" | "overview" | "kitchen";
 
-const isCrustDemo =
-  new URLSearchParams(window.location.search).get("demo") === "crust";
+const demoMode = new URLSearchParams(window.location.search).get("demo");
+const isTestKitchenDemo = import.meta.env.DEV && demoMode === "true";
+const isCrustDemo = import.meta.env.DEV && demoMode === "crust";
+
+function safeClientError(error: unknown, fallback: string) {
+  const raw = error instanceof Error ? error.message : fallback;
+  return raw
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, "[redacted-api-key]")
+    .replace(/([?&](?:key|access_token)=)[^&\s]+/gi, "$1[redacted-token]")
+    .replace(
+      /\b(?:auth_tokens|authTokens)\/[^\s"'&]+/gi,
+      "[redacted-token]"
+    )
+    .slice(0, 500);
+}
+
+function logClientError(event: string, error: unknown) {
+  console.error(`[Mise] ${event}`, {
+    name: error instanceof Error ? error.name : "UnknownError",
+    message: safeClientError(error, "No safe error detail was available.")
+  });
+}
 
 export default function App() {
-  const [screen, setScreen] = useState<Screen>(isCrustDemo ? "kitchen" : "library");
+  const [screen, setScreen] = useState<Screen>(
+    isTestKitchenDemo || isCrustDemo ? "overview" : "library"
+  );
   const [selectedRecipeId, setSelectedRecipeId] = useState(featuredRecipe.id);
-  const [currentStep, setCurrentStep] = useState(isCrustDemo ? 4 : 1);
+  const [currentStep, setCurrentStep] = useState(1);
   const [completedSteps, setCompletedSteps] = useState<number[]>([]);
   const [status, setStatus] = useState<VoiceStatus>("disconnected");
-  const [mode, setMode] = useState<ProviderMode>("mock");
+  const [mode, setMode] = useState<ProviderMode>("gemini-live");
   const [muted, setMuted] = useState(false);
   const [connectionNotice, setConnectionNotice] = useState("");
   const [lastAssistantText, setLastAssistantText] = useState("");
@@ -63,8 +86,6 @@ export default function App() {
   const toolExecutorRef = useRef<
     ((call: ToolCall) => Promise<Record<string, unknown>>) | undefined
   >(undefined);
-  const demoStartedRef = useRef(false);
-
   selectedRecipeRef.current = selectedRecipe;
   stepRef.current = currentStep;
   completedRef.current = completedSteps;
@@ -220,8 +241,9 @@ export default function App() {
         }
       },
       onError: (error) => {
-        console.error(error);
-        setConnectionNotice(error.message);
+        logClientError("voice-provider-error", error);
+        setConnectionNotice(safeClientError(error, "Voice connection error."));
+        setStatus("error");
       }
     }),
     []
@@ -249,7 +271,7 @@ export default function App() {
   );
 
   const startCooking = useCallback(
-    async (recipeToStart: Recipe, initialStep = 1) => {
+    (recipeToStart: Recipe, initialStep = 1) => {
       const previousProvider = providerRef.current;
       providerRef.current = undefined;
       if (previousProvider) void previousProvider.disconnect().catch(() => undefined);
@@ -269,40 +291,74 @@ export default function App() {
       toolUndoRef.current.clear();
       setCheckpointOpen(false);
       setScreen("kitchen");
-      setStatus("connecting");
+      setStatus("disconnected");
+      setMode("gemini-live");
       setMuted(false);
       setConnectionNotice("");
       lastAssistantRef.current = "";
       setLastAssistantText("");
-
-      const context = buildContext();
-      let geminiProvider: VoiceProvider | undefined;
-      try {
-        geminiProvider = createGeminiProvider(events, context);
-        providerRef.current = geminiProvider;
-        setMode("gemini-live");
-        await geminiProvider.connect();
-        setConnectionNotice(
-          (current) => current || "Gemini Live connected · native audio"
-        );
-        void narrateCurrentStep();
-      } catch (error) {
-        await geminiProvider?.disconnect().catch(() => undefined);
-        const mockProvider = createMockProvider(events, context);
-        providerRef.current = mockProvider;
-        setMode("mock");
-        await mockProvider.connect();
-        setConnectionNotice(
-          error instanceof GeminiUnavailableError ||
-            (error instanceof Error && error.name === "GeminiUnavailableError")
-            ? "Local preview · add GEMINI_API_KEY for Gemini Live"
-            : "Gemini Live unavailable · continuing in local preview"
-        );
-        void narrateCurrentStep();
-      }
     },
-    [buildContext, clearTimers, events, narrateCurrentStep]
+    [clearTimers]
   );
+
+  const connectGeminiVoice = useCallback(async () => {
+    const previousProvider = providerRef.current;
+    providerRef.current = undefined;
+    if (previousProvider) await previousProvider.disconnect().catch(() => undefined);
+
+    setStatus("connecting");
+    setMode("gemini-live");
+    setMuted(false);
+    setConnectionNotice("");
+
+    const geminiProvider = createGeminiProvider(events, buildContext());
+    providerRef.current = geminiProvider;
+    try {
+      await geminiProvider.connect();
+      setConnectionNotice("Gemini Live connected · native audio");
+    } catch (error) {
+      logClientError("gemini-live-connection-failed", error);
+      await geminiProvider.disconnect().catch(() => undefined);
+      providerRef.current = undefined;
+      setStatus("error");
+      const detail = safeClientError(error, "Retry or use Local Preview.");
+      setConnectionNotice(
+        error instanceof GeminiUnavailableError ||
+          (error instanceof Error && error.name === "GeminiUnavailableError")
+          ? detail
+          : `Gemini Live unavailable · ${detail}`
+      );
+    }
+  }, [buildContext, events]);
+
+  const connectMockVoice = useCallback(async () => {
+    const previousProvider = providerRef.current;
+    providerRef.current = undefined;
+    if (previousProvider) await previousProvider.disconnect().catch(() => undefined);
+
+    setStatus("connecting");
+    setMode("mock");
+    setMuted(false);
+    setConnectionNotice("Local Preview · responses are simulated");
+
+    try {
+      const mockProvider = createMockProvider(events, buildContext(), {
+        allowMockImageFallback: !isTestKitchenDemo
+      });
+      providerRef.current = mockProvider;
+      await mockProvider.connect();
+    } catch (error) {
+      logClientError("local-preview-connection-failed", error);
+      providerRef.current = undefined;
+      setStatus("error");
+      setConnectionNotice(
+        `Local Preview unavailable · ${safeClientError(
+          error,
+          "No safe error detail was available."
+        )}`
+      );
+    }
+  }, [buildContext, events]);
 
   const returnToLibrary = useCallback(() => {
     const provider = providerRef.current;
@@ -320,7 +376,7 @@ export default function App() {
     setLastAssistantText("");
     lastAssistantRef.current = "";
     setMuted(false);
-    setMode("mock");
+    setMode("gemini-live");
     setStatus("disconnected");
     setScreen("library");
   }, [clearTimers]);
@@ -334,13 +390,6 @@ export default function App() {
     setCompletedSteps([]);
     setScreen("overview");
   }, []);
-
-  useEffect(() => {
-    if (!isCrustDemo || demoStartedRef.current) return;
-    demoStartedRef.current = true;
-    void startCooking(featuredRecipe, 4);
-    startTimer("First side", 120);
-  }, [startCooking, startTimer]);
 
   useEffect(() => {
     const provider = providerRef.current;
@@ -377,8 +426,15 @@ export default function App() {
   }
 
   async function sendText(text: string) {
+    const provider = providerRef.current;
+    if (!provider) {
+      setConnectionNotice(
+        "Connect Gemini Live or continue in Local Preview before asking Mise."
+      );
+      return;
+    }
     try {
-      await providerRef.current?.sendText(text);
+      await provider.sendText(text);
     } catch (error) {
       setConnectionNotice(
         error instanceof Error ? error.message : "Could not send that."
@@ -390,11 +446,11 @@ export default function App() {
     file: File,
     question: string
   ): Promise<ImageAssessment> {
-    if (!providerRef.current) {
-      throw new Error("Start cooking before checking a photo.");
-    }
-    providerRef.current.updateRecipeContext(buildContext());
-    return providerRef.current.sendImage(file, question);
+    const context = buildContext();
+    const provider = providerRef.current;
+    if (!provider) return analyzeImageWithGemini(file, question, context);
+    provider.updateRecipeContext(context);
+    return provider.sendImage(file, question);
   }
 
   function startSuggestedTimer(timer: SuggestedTimer) {
@@ -405,7 +461,12 @@ export default function App() {
     return (
       <RecipeLibraryScreen
         onSelect={selectRecipe}
-        onStart={(recipeToStart) => void startCooking(recipeToStart)}
+        onStart={(recipeToStart) =>
+          startCooking(
+            recipeToStart,
+            isCrustDemo && recipeToStart.id === featuredRecipe.id ? 4 : 1
+          )
+        }
       />
     );
   }
@@ -415,7 +476,12 @@ export default function App() {
       <RecipeOverviewScreen
         recipe={selectedRecipe}
         onBack={() => setScreen("library")}
-        onStart={() => void startCooking(selectedRecipe)}
+        onStart={() =>
+          startCooking(
+            selectedRecipe,
+            isCrustDemo && selectedRecipe.id === featuredRecipe.id ? 4 : 1
+          )
+        }
       />
     );
   }
@@ -446,6 +512,8 @@ export default function App() {
         onPrevious={() => navigateAndNarrate(currentStep - 1)}
         onNext={() => navigateAndNarrate(currentStep + 1, true)}
         onReadStep={() => void narrateCurrentStep()}
+        onConnectVoice={() => void connectGeminiVoice()}
+        onUseMock={() => void connectMockVoice()}
         onToggleMuted={() => void toggleMuted()}
         onOpenCamera={() => setCheckpointOpen(true)}
         onSendText={sendText}
@@ -460,6 +528,9 @@ export default function App() {
         }
         uploadPrompt={
           checkpoint?.question ?? `Photograph step ${currentStep}`
+        }
+        showTestKitchenImages={
+          isTestKitchenDemo && selectedRecipe.id === featuredRecipe.id
         }
         onClose={() => setCheckpointOpen(false)}
         onAnalyze={analyzeImage}
