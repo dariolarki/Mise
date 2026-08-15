@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Analytics } from "@vercel/analytics/react";
 import { ImageCheckpoint } from "./components/ImageCheckpoint";
 import { KitchenScreen } from "./components/KitchenScreen";
 import { RecipeLibraryScreen } from "./components/RecipeLibraryScreen";
@@ -535,6 +536,7 @@ export default function App() {
         onClose={() => setCheckpointOpen(false)}
         onAnalyze={analyzeImage}
       />
+      <Analytics />
     </>
   );
 }
